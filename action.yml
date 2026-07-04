@@ -1,0 +1,178 @@
+# Copyright 2026 Google LLC
+# Apache-2.0 License
+#
+# action.yml — Composite Action: Antigravity PR Review
+# ─────────────────────────────────────────────────────────────────────────────
+# Runs the Google Antigravity SDK (google-antigravity) directly on the GitHub
+# Actions host runner, which gives the SDK access to the host's Docker daemon.
+# This allows the SDK to spawn the GitHub MCP server in an isolated Docker
+# container to read files, inspect PRs, and post review comments safely.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 'Antigravity PR Review Action'
+description: >
+  Runs the Google Antigravity Python SDK as an adversarial code auditor.
+  Enforces four review policies: TypeScript type safety, performance regression
+  detection on critical paths, security compliance, and unit test coverage for
+  new exported functions. Posts structured review comments on PRs with findings
+  grouped by severity: BLOCKER → TEST-MISSING → SECURITY → PERF-REGRESSION → WARNING → INFO.
+author: 'Your Org'
+
+# ─── Inputs ──────────────────────────────────────────────────────────────────
+inputs:
+  api-key:
+    description: >
+      Google Gemini / Antigravity API key used to authenticate language model
+      interactions. Store this in a GitHub Actions secret named
+      ANTIGRAVITY_API_KEY.
+    required: true
+
+  github-token:
+    description: >
+      GitHub token used by the agent to read PR content and post review
+      comments. The default GITHUB_TOKEN from the Actions runtime is sufficient
+      for same-repo PRs.
+    required: false
+    default: '${{ github.token }}'
+
+  mode:
+    description: >
+      Operational mode of the agent.
+        "review"   – first-pass code audit (default)
+        "goal"     – multi-turn autonomous problem solving
+        "one-shot" – single query, no follow-up turns
+    required: false
+    default: 'review'
+
+  prompt:
+    description: >
+      Prompt or slash-command to execute. When mode=review this should be a
+      slash-command like "/antigravity-review" that maps to a TOML file at
+      .github/commands/<name>.toml. For goal/one-shot mode provide a free-text
+      task description.
+    required: false
+
+  goal-prompt:
+    description: >
+      Alias for prompt when mode=goal. Ignored when prompt is explicitly set.
+    required: false
+
+  trust-workspace:
+    description: >
+      Grant the agent write access to the workspace directory. Set to "true"
+      only for trusted same-repo PRs. Defaults to "false" for safety.
+    required: false
+    default: 'false'
+
+  sandbox-profile:
+    description: >
+      Enable kernel-level or process-level sandboxing. "true" applies the
+      default restrictive profile. A path to a custom seccomp/AppArmor profile
+      can also be supplied.
+    required: false
+    default: 'true'
+
+  github_pr_number:
+    description: 'The pull request number to review.'
+    required: false
+    default: '${{ github.event.pull_request.number }}'
+
+  github_issue_number:
+    description: 'The issue number (if the trigger is an issue_comment event).'
+    required: false
+    default: '${{ github.event.issue.number }}'
+
+  additional_context:
+    description: >
+      Extra context string passed to the agent. The workflow uses this field to
+      inject policy flags such as ENFORCE_TS_TYPE_SAFETY=true.
+    required: false
+
+  upload_artifacts:
+    description: 'Upload the agent response as a workflow artifact ("true"/"false").'
+    required: false
+    default: 'false'
+
+# ─── Outputs ─────────────────────────────────────────────────────────────────
+outputs:
+  response:
+    description: 'The final review text produced by the Antigravity agent.'
+    value: '${{ steps.agy_run.outputs.response }}'
+  stats:
+    description: 'JSON object with execution metrics and token usage.'
+    value: '${{ steps.agy_run.outputs.stats }}'
+
+# ─── Composite steps ─────────────────────────────────────────────────────────
+runs:
+  using: 'composite'
+  steps:
+    # ── Python setup ──────────────────────────────────────────────────────────
+    - name: 'Set up Python 3.11'
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+      with:
+        python-version: '3.11'
+
+    # ── SDK install ───────────────────────────────────────────────────────────
+    - name: 'Install Google Antigravity SDK'
+      shell: bash
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install google-antigravity tomli
+
+    # ── Agent execution ───────────────────────────────────────────────────────
+    - name: 'Run Antigravity SDK Agent'
+      id: agy_run
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Resolve the prompt
+        PROMPT_TEXT="${PROMPT:-}"
+        if [[ -z "${PROMPT_TEXT}" ]]; then
+          if [[ "${MODE}" == "review" ]]; then
+            PROMPT_TEXT="/antigravity-review"
+          else
+            PROMPT_TEXT="${GOAL_PROMPT:-}"
+          fi
+        fi
+
+        if [[ -z "${PROMPT_TEXT}" ]]; then
+          echo "::error::Either 'prompt' or 'goal-prompt' must be provided." >&2
+          exit 1
+        fi
+
+        export PROMPT="${PROMPT_TEXT}"
+        export GEMINI_API_KEY="${ANTIGRAVITY_API_KEY:-${GEMINI_API_KEY:-}}"
+        export GITHUB_TOKEN="${GITHUB_TOKEN}"
+        export TRUST_WORKSPACE="${TRUST_WORKSPACE}"
+
+        python3 "${GITHUB_ACTION_PATH}/run_agent.py"
+      env:
+        MODE:                  '${{ inputs.mode }}'
+        PROMPT:                '${{ inputs.prompt }}'
+        GOAL_PROMPT:           '${{ inputs.goal-prompt }}'
+        TRUST_WORKSPACE:       '${{ inputs.trust-workspace }}'
+        ANTIGRAVITY_API_KEY:   '${{ inputs.api-key }}'
+        GEMINI_API_KEY:        '${{ inputs.api-key }}'
+        GITHUB_TOKEN:          '${{ inputs.github-token }}'
+        REPOSITORY:            '${{ github.repository }}'
+        PULL_REQUEST_NUMBER:   '${{ inputs.github_pr_number }}'
+        GITHUB_PR_NUMBER:      '${{ inputs.github_pr_number }}'
+        GITHUB_ISSUE_NUMBER:   '${{ inputs.github_issue_number }}'
+        ADDITIONAL_CONTEXT:    '${{ inputs.additional_context || inputs.goal-prompt }}'
+        TITLE:                 '${{ github.event.pull_request.title || github.event.issue.title }}'
+        DESCRIPTION:           '${{ github.event.pull_request.body || github.event.issue.body }}'
+        EVENT_NAME:            '${{ github.event_name }}'
+        IS_PULL_REQUEST:       '${{ !!github.event.pull_request }}'
+        ISSUE_NUMBER:          '${{ github.event.pull_request.number || github.event.issue.number }}'
+        GITHUB_ACTION_PATH:    '${{ github.action_path }}'
+
+    # ── Optional artifact upload ──────────────────────────────────────────────
+    - name: 'Upload agent response artifact'
+      if: inputs.upload_artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: 'antigravity-review-response'
+        path: '${{ github.action_path }}/response.txt'
+        if-no-files-found: ignore
+        retention-days: 7

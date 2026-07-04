@@ -1,0 +1,250 @@
+# Copyright 2026 Google LLC
+# Apache-2.0 License
+#
+# Antigravity PR Review Workflow
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers:
+#   • pull_request (opened / reopened) — runs an automated first-pass review
+#   • issue_comment (created)          — runs an on-demand review when a
+#                                        maintainer posts "@agy /review"
+#   • workflow_dispatch                — allows manual trigger from Actions tab
+#
+# Conditional skip:
+#   The review job is gated by a path-filter job that exits early when every
+#   changed file is documentation-only (*.md, *.mdx, *.rst, *.txt, docs/**).
+#   This prevents burning API credits on trivial doc PRs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: '🔎 Antigravity PR Review'
+
+on:
+  pull_request:
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review (workflow_dispatch only)'
+        required: false
+
+# Cancel in-flight reviews for the same PR when a new commit is pushed.
+# Uses pr number for pull_request events; falls back to branch name otherwise.
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}'
+  cancel-in-progress: true
+
+# ─── Permissions ──────────────────────────────────────────────────────────────
+# Minimal scope: read code, write PR comments and issue comments.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+# ─── Environment defaults ─────────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: '3.11'
+  ACTION_TIMEOUT_MINUTES: '20'
+
+jobs:
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │  path-filter: detect whether the PR is documentation-only               │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  path-filter:
+    name: 'Detect changed file types'
+    runs-on: ubuntu-latest
+    # Only run this job for actual pull_request events (not comments / dispatches).
+    if: >
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch'
+    outputs:
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      has_ts: ${{ steps.filter.outputs.has_ts }}
+      has_critical_paths: ${{ steps.filter.outputs.has_critical_paths }}
+      has_new_exports: ${{ steps.filter.outputs.has_new_exports }}
+    steps:
+      - name: 'Checkout repository'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Classify changed files'
+        id: filter
+        shell: bash
+        run: |
+          # Fetch the PR base so we can diff properly
+          BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          HEAD="${{ github.sha }}"
+
+          changed_files=$(git diff --name-only "$BASE" "$HEAD")
+          echo "Changed files:"
+          echo "$changed_files"
+
+          # Documentation-only patterns
+          doc_pattern='^(docs/|.*\.(md|mdx|rst|txt|LICENSE|CHANGELOG|CONTRIBUTING))$'
+
+          # TypeScript / JavaScript files
+          ts_pattern='\.(ts|tsx|js|jsx|mts|cts)$'
+
+          # Critical-path directories (configure for your repo)
+          critical_pattern='^(src/(services|middleware)|packages/shared)'
+
+          docs_only=true
+          has_ts=false
+          has_critical=false
+          has_new_exports=false
+
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            if ! echo "$file" | grep -qE "$doc_pattern"; then
+              docs_only=false
+            fi
+            if echo "$file" | grep -qE "$ts_pattern"; then
+              has_ts=true
+            fi
+            if echo "$file" | grep -qE "$critical_pattern"; then
+              has_critical=true
+            fi
+          done <<< "$changed_files"
+
+          # Detect new public symbols in TypeScript/JavaScript and Python diff lines.
+          # A leading '+' (but not '+++') means the line was added in the diff.
+
+          # TS/JS: match export keywords on added lines
+          if git diff "$BASE" "$HEAD" -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mts' '*.cts' \
+               | grep -E '^\+[^+]' \
+               | grep -qE '^\+[[:space:]]*(export[[:space:]]+(async[[:space:]]+)?function|export[[:space:]]+(const|class|default)[[:space:]])'; then
+            has_new_exports=true
+          fi
+
+          # Python: match top-level public def/class on added lines.
+          # Top-level means the '+' is followed immediately by 'def' or 'class'
+          # (no leading spaces — indented defs are methods, not top-level).
+          # Names starting with '_' are private by convention and are excluded.
+          if git diff "$BASE" "$HEAD" -- '*.py' \
+               | grep -E '^\+[^+]' \
+               | grep -qE '^\+(def|class)[[:space:]]+[A-Za-z][A-Za-z0-9_]*[[:space:](:]'; then
+            has_new_exports=true
+          fi
+
+          echo "docs_only=$docs_only"       >> "$GITHUB_OUTPUT"
+          echo "has_ts=$has_ts"             >> "$GITHUB_OUTPUT"
+          echo "has_critical_paths=$has_critical" >> "$GITHUB_OUTPUT"
+          echo "has_new_exports=$has_new_exports" >> "$GITHUB_OUTPUT"
+
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │  antigravity-review: main agent job                                     │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  antigravity-review:
+    name: 'Antigravity Code Review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    needs: [path-filter]
+
+    # Skip the review when:
+    #   • path-filter ran and flagged the PR as docs-only
+    # Run when:
+    #   • It is a PR event (opened/reopened): not docs-only AND has substantive
+    #     changes (has_new_exports=true OR has_ts=true OR has_critical_paths=true).
+    #     A PR that touches only non-doc files with no new exports, no TS, and
+    #     no critical paths (e.g. config tweaks, asset updates) still runs the
+    #     review via the has_ts/has_critical fallback. To skip those too, remove
+    #     those clauses and rely solely on has_new_exports.
+    #   • It is a maintainer-triggered comment "@agy /review"
+    #   • It is a manual workflow_dispatch
+    if: >
+      (
+        github.event_name == 'pull_request' &&
+        needs.path-filter.outputs.docs_only != 'true' &&
+        (
+          needs.path-filter.outputs.has_new_exports == 'true' ||
+          needs.path-filter.outputs.has_ts == 'true' ||
+          needs.path-filter.outputs.has_critical_paths == 'true'
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '@agy /review') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        )
+      ) ||
+      github.event_name == 'workflow_dispatch'
+
+    # Prevent review loops: only review PRs from the same repo (not forks) for
+    # automated runs. On-demand comment reviews are restricted to maintainers above.
+    # Fork PRs can only be reviewed via manual dispatch or maintainer comment.
+    env:
+      SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+
+    steps:
+      - name: 'Checkout repository'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 'Resolve PR number'
+        id: pr
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pass metadata about file types so the agent can adapt its review focus
+      - name: 'Build additional context'
+        id: context
+        shell: bash
+        run: |
+          TS_FLAG="${{ needs.path-filter.outputs.has_ts }}"
+          CRIT_FLAG="${{ needs.path-filter.outputs.has_critical_paths }}"
+          EXPORTS_FLAG="${{ needs.path-filter.outputs.has_new_exports }}"
+
+          CTX="Custom review policy flags:"
+          [[ "$TS_FLAG" == "true" ]]      && CTX="$CTX ENFORCE_TS_TYPE_SAFETY=true;"
+          [[ "$CRIT_FLAG" == "true" ]]    && CTX="$CTX FLAG_PERF_REGRESSIONS=true; ENFORCE_SECURITY_COMPLIANCE=true;"
+          [[ "$EXPORTS_FLAG" == "true" ]] && CTX="$CTX ENFORCE_TEST_COVERAGE=true;"
+
+          echo "value=$CTX" >> "$GITHUB_OUTPUT"
+
+      - name: 'Run Antigravity PR Review'
+        uses: rsamborski/run-agy-sdk@a3f1b2c  # pin to a specific SHA in production
+        id: agy_pr_review
+        with:
+          api-key: '${{ secrets.ANTIGRAVITY_API_KEY }}'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          mode: 'review'
+          prompt: '/antigravity-review'
+          trust-workspace: 'true'
+          sandbox-profile: 'true'
+          github_pr_number: '${{ steps.pr.outputs.number }}'
+          additional_context: '${{ steps.context.outputs.value }}'
+
+      - name: 'Post skip notice for docs-only PR'
+        if: >
+          github.event_name == 'pull_request' &&
+          needs.path-filter.outputs.docs_only == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '> 📄 **Antigravity PR Review skipped**',
+                '>',
+                '> This PR contains only documentation changes (`.md`, `.rst`, `docs/**`).',
+                '> A full code review is not required. A maintainer can trigger one manually by',
+                '> commenting `@agy /review` or via the **Actions** tab.'
+              ].join('\n')
+            });
