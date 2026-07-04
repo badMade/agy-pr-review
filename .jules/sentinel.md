@@ -1,0 +1,4 @@
+## 2024-05-24 - [Environment Variable Injection in TOML Command Templates]
+**Vulnerability:** The `_load_command` function interpolates environment variables into command templates without filtering. Because `env_context` passed `**os.environ` into the interpolation logic, a user could create or modify a `.toml` file to exfiltrate sensitive secrets (like `GEMINI_API_KEY` or `GITHUB_TOKEN`) that are loaded in the environment into the prompt.
+**Learning:** Never pass raw environment variables directly to an interpolation context if the template is user-controlled. Environment variables frequently contain highly sensitive secrets.
+**Prevention:** Explicitly filter out sensitive environment variables using a blocklist (or prefer an allowlist if possible) before passing environment context into template substitution mechanisms.

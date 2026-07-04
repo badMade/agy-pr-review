@@ -397,8 +397,14 @@ async def main() -> None:
 
     if is_review_mode:
         command_name = prompt_text[1:]
+        # Filter out sensitive environment variables from interpolation context
+        safe_env = {
+            k: v for k, v in os.environ.items()
+            if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH", "CRED"))
+        }
+
         env_context = {
-            **os.environ,
+            **safe_env,
             "REPOSITORY": repository or "",
             "PULL_REQUEST_NUMBER": pr_number or "",
             "ISSUE_NUMBER": os.environ.get("GITHUB_ISSUE_NUMBER", ""),
