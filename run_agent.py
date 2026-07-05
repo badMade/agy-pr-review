@@ -397,10 +397,25 @@ async def main() -> None:
 
     if is_review_mode:
         command_name = prompt_text[1:]
-        # Filter out sensitive environment variables from interpolation context
+        # Use an allowlist of safe, non-sensitive environment variables to prevent accidental exposure of secrets
+        safe_env_keys = {
+            "GITHUB_REPOSITORY",
+            "GITHUB_SHA",
+            "GITHUB_REF",
+            "GITHUB_RUN_ID",
+            "GITHUB_RUN_NUMBER",
+            "GITHUB_ACTOR",
+            "GITHUB_WORKFLOW",
+            "GITHUB_HEAD_REF",
+            "GITHUB_BASE_REF",
+            "GITHUB_EVENT_NAME",
+            "GITHUB_WORKSPACE",
+            "GITHUB_ACTION",
+            "GITHUB_ACTION_PATH",
+        }
         safe_env = {
             k: v for k, v in os.environ.items()
-            if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH", "CRED"))
+            if k in safe_env_keys
         }
 
         env_context = {
