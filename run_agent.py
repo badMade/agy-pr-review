@@ -315,7 +315,7 @@ def _build_goal_policies(trust_workspace: bool) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 # TOML command loading with variable interpolation
 # ─────────────────────────────────────────────────────────────────────────────
-def _load_command(
+async def _load_command(
     command_name: str,
     action_path: str,
     env_context: dict[str, str],
@@ -335,8 +335,12 @@ def _load_command(
         return None
 
     print(f"Loading custom command config from: {command_file}")
-    with open(command_file, "rb") as f:
-        data = _load_toml(f)
+
+    def _read_and_parse():
+        with open(command_file, "rb") as f:
+            return _load_toml(f)
+
+    data = await asyncio.to_thread(_read_and_parse)
 
     raw_prompt: str = data.get("prompt", "")
 
@@ -426,7 +430,7 @@ async def main() -> None:
             "ADDITIONAL_CONTEXT": additional_context,
         }
 
-        loaded = _load_command(command_name, action_path, env_context)
+        loaded = await _load_command(command_name, action_path, env_context)
         if loaded:
             # Command file provides its own instructions; augment with policies
             system_instructions = loaded
