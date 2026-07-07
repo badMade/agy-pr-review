@@ -327,8 +327,7 @@ def _load_command(
     """
     # Guard against path traversal
     if ".." in command_name or "/" in command_name or "\\" in command_name:
-        print(f"::error::Invalid command name: {command_name!r}")
-        sys.exit(1)
+        raise ValueError(f"Invalid command name: {command_name!r}")
 
     command_file = os.path.join(action_path, ".github", "commands", f"{command_name}.toml")
     if not os.path.exists(command_file):
