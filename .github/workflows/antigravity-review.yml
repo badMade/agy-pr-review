@@ -71,11 +71,14 @@ jobs:
 
       - name: 'Classify changed files'
         id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
         shell: bash
         run: |
           # Fetch the PR base so we can diff properly
-          BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
-          HEAD="${{ github.sha }}"
+          BASE="${BASE_SHA:-HEAD~1}"
+          HEAD="${HEAD_SHA}"
 
           changed_files=$(git diff --name-only "$BASE" "$HEAD")
           echo "Changed files:"
@@ -190,14 +193,19 @@ jobs:
 
       - name: 'Resolve PR number'
         id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
-            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            echo "number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "number=${PR_NUMBER_INPUT}" >> "$GITHUB_OUTPUT"
           else
-            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "number=${PULL_REQUEST_NUMBER}" >> "$GITHUB_OUTPUT"
           fi
 
       # Pass metadata about file types so the agent can adapt its review focus
