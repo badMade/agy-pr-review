@@ -92,7 +92,7 @@ cp agy-pr-review/run_agent.py      your-repo/run_agent.py
 
 ## Step 4 — Pin the composite action SHA (production hardening)
 
-The workflow references `rsamborski/run-agy-sdk@a3f1b2c` as a placeholder.
+The workflow references `rsamborski/run-agy-sdk@90e944e2f0d1bfcc392c954cd937f7d3b36d1441` as a placeholder.
 For production, pin to the exact commit SHA of the upstream action to prevent
 supply-chain attacks from upstream changes.
 
@@ -105,7 +105,7 @@ Replace the `uses:` line in `.github/workflows/antigravity-review.yml`:
 
 ```yaml
 # Before (placeholder)
-uses: rsamborski/run-agy-sdk@a3f1b2c
+uses: rsamborski/run-agy-sdk@90e944e2f0d1bfcc392c954cd937f7d3b36d1441
 
 # After (pinned)
 uses: rsamborski/run-agy-sdk@<full-40-char-sha>
