@@ -36,6 +36,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+from dataclasses import dataclass
 import os
 import re
 import sys
@@ -67,6 +68,7 @@ except ImportError:
             return tomli.load(f)
 
     except ImportError:
+
         class _SimpleToml:
             @staticmethod
             def load(f) -> dict:
@@ -259,8 +261,11 @@ def _build_github_mcp() -> types.McpStdioServer:
         name="github",
         command="docker",
         args=[
-            "run", "-i", "--rm",
-            "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "run",
+            "-i",
+            "--rm",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
             "ghcr.io/github/github-mcp-server:v0.27.0",
         ],
         enabled_tools=[
@@ -330,7 +335,9 @@ def _load_command(
         print(f"::error::Invalid command name: {command_name!r}")
         sys.exit(1)
 
-    command_file = os.path.join(action_path, ".github", "commands", f"{command_name}.toml")
+    command_file = os.path.join(
+        action_path, ".github", "commands", f"{command_name}.toml"
+    )
     if not os.path.exists(command_file):
         return None
 
@@ -365,14 +372,28 @@ def _write_github_output(full_text: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Main entry point
 # ─────────────────────────────────────────────────────────────────────────────
-async def main() -> None:
-    # ── 1. Collect environment variables ─────────────────────────────────────
+
+
+@dataclass
+class AgentEnv:
+    api_key: str
+    github_token: str
+    pr_number: str
+    repository: str
+    additional_context: str
+    prompt_text: str
+    trust_workspace: bool
+    action_path: str
+
+
+def _collect_env_vars() -> AgentEnv:
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTIGRAVITY_API_KEY")
-    github_token = (
-        os.environ.get("GITHUB_TOKEN")
-        or os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+        "GITHUB_PERSONAL_ACCESS_TOKEN"
     )
-    pr_number = os.environ.get("PULL_REQUEST_NUMBER") or os.environ.get("GITHUB_PR_NUMBER")
+    pr_number = os.environ.get("PULL_REQUEST_NUMBER") or os.environ.get(
+        "GITHUB_PR_NUMBER"
+    )
     repository = os.environ.get("REPOSITORY") or os.environ.get("GITHUB_REPOSITORY")
     additional_context = os.environ.get("ADDITIONAL_CONTEXT", "")
     prompt_text = os.environ.get("PROMPT", "").strip()
@@ -390,13 +411,25 @@ async def main() -> None:
     # Propagate token so the Docker MCP process inherits it
     os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"] = github_token
 
-    # ── 2. Build system instructions ─────────────────────────────────────────
+    return AgentEnv(
+        api_key=api_key,
+        github_token=github_token,
+        pr_number=pr_number or "",
+        repository=repository or "",
+        additional_context=additional_context,
+        prompt_text=prompt_text,
+        trust_workspace=trust_workspace,
+        action_path=action_path,
+    )
+
+
+def _build_instructions_and_prompt(env: AgentEnv) -> tuple[str, str, bool]:
     system_instructions = BASE_SYSTEM_INSTRUCTIONS
-    chat_prompt = prompt_text
-    is_review_mode = prompt_text.startswith("/")
+    chat_prompt = env.prompt_text
+    is_review_mode = env.prompt_text.startswith("/")
 
     if is_review_mode:
-        command_name = prompt_text[1:]
+        command_name = env.prompt_text[1:]
         # Use an allowlist of safe, non-sensitive environment variables to prevent accidental exposure of secrets
         safe_env_keys = {
             "GITHUB_REPOSITORY",
@@ -413,20 +446,17 @@ async def main() -> None:
             "GITHUB_ACTION",
             "GITHUB_ACTION_PATH",
         }
-        safe_env = {
-            k: v for k, v in os.environ.items()
-            if k in safe_env_keys
-        }
+        safe_env = {k: v for k, v in os.environ.items() if k in safe_env_keys}
 
         env_context = {
             **safe_env,
-            "REPOSITORY": repository or "",
-            "PULL_REQUEST_NUMBER": pr_number or "",
+            "REPOSITORY": env.repository or "",
+            "PULL_REQUEST_NUMBER": env.pr_number or "",
             "ISSUE_NUMBER": os.environ.get("GITHUB_ISSUE_NUMBER", ""),
-            "ADDITIONAL_CONTEXT": additional_context,
+            "ADDITIONAL_CONTEXT": env.additional_context,
         }
 
-        loaded = _load_command(command_name, action_path, env_context)
+        loaded = _load_command(command_name, env.action_path, env_context)
         if loaded:
             # Command file provides its own instructions; augment with policies
             system_instructions = loaded
@@ -437,21 +467,35 @@ async def main() -> None:
             )
 
         # Append runtime policy overrides derived from the workflow context
-        policy_addendum = _build_policy_addendum(additional_context)
+        policy_addendum = _build_policy_addendum(env.additional_context)
         if policy_addendum:
             system_instructions += policy_addendum
 
         # Provide PR-specific context in the chat turn
         chat_prompt = (
-            f"Run the command: {prompt_text}\n\n"
-            f"Repository: {repository}\n"
-            f"PR number: {pr_number}\n"
-            f"Additional context: {additional_context}"
+            f"Run the command: {env.prompt_text}\n\n"
+            f"Repository: {env.repository}\n"
+            f"PR number: {env.pr_number}\n"
+            f"Additional context: {env.additional_context}"
         )
     else:
         # Non-review goal/one-shot: inject context as a preamble
-        if additional_context:
-            chat_prompt = f"Context: {additional_context}\n\nTask: {prompt_text}"
+        if env.additional_context:
+            chat_prompt = (
+                f"Context: {env.additional_context}\n\nTask: {env.prompt_text}"
+            )
+
+    return system_instructions, chat_prompt, is_review_mode
+
+
+async def main() -> None:
+    # ── 1. Collect environment variables ─────────────────────────────────────
+    env = _collect_env_vars()
+
+    # ── 2. Build system instructions ─────────────────────────────────────────
+    system_instructions, chat_prompt, is_review_mode = _build_instructions_and_prompt(
+        env
+    )
 
     # ── 3. Configure MCP + policies ───────────────────────────────────────────
     github_mcp = _build_github_mcp()
@@ -459,11 +503,11 @@ async def main() -> None:
     if is_review_mode:
         policies = _build_review_policies(github_mcp)
     else:
-        policies = _build_goal_policies(trust_workspace)
+        policies = _build_goal_policies(env.trust_workspace)
 
     # ── 4. Initialize agent ───────────────────────────────────────────────────
     config = LocalAgentConfig(
-        api_key=api_key,
+        api_key=env.api_key,
         system_instructions=system_instructions,
         mcp_servers=[github_mcp],
         policies=policies,
@@ -472,10 +516,10 @@ async def main() -> None:
 
     print("=" * 60)
     print("Starting Antigravity Agent")
-    print(f"  Repository : {repository}")
-    print(f"  PR number  : {pr_number}")
+    print(f"  Repository : {env.repository}")
+    print(f"  PR number  : {env.pr_number}")
     print(f"  Mode       : {'review' if is_review_mode else 'goal'}")
-    print(f"  Trust ws   : {trust_workspace}")
+    print(f"  Trust ws   : {env.trust_workspace}")
     print("=" * 60)
 
     async with Agent(config) as agent:
