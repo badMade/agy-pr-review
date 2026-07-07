@@ -217,7 +217,7 @@ jobs:
           echo "value=$CTX" >> "$GITHUB_OUTPUT"
 
       - name: 'Run Antigravity PR Review'
-        uses: rsamborski/run-agy-sdk@a3f1b2c  # pin to a specific SHA in production
+        uses: rsamborski/run-agy-sdk@main  # pin to a specific SHA in production
         id: agy_pr_review
         with:
           api-key: '${{ secrets.ANTIGRAVITY_API_KEY }}'
