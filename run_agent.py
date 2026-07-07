@@ -67,6 +67,7 @@ except ImportError:
             return tomli.load(f)
 
     except ImportError:
+
         class _SimpleToml:
             @staticmethod
             def load(f) -> dict:
@@ -259,8 +260,11 @@ def _build_github_mcp() -> types.McpStdioServer:
         name="github",
         command="docker",
         args=[
-            "run", "-i", "--rm",
-            "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "run",
+            "-i",
+            "--rm",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
             "ghcr.io/github/github-mcp-server:v0.27.0",
         ],
         enabled_tools=[
@@ -330,7 +334,9 @@ def _load_command(
         print(f"::error::Invalid command name: {command_name!r}")
         sys.exit(1)
 
-    command_file = os.path.join(action_path, ".github", "commands", f"{command_name}.toml")
+    command_file = os.path.join(
+        action_path, ".github", "commands", f"{command_name}.toml"
+    )
     if not os.path.exists(command_file):
         return None
 
@@ -344,6 +350,16 @@ def _load_command(
         return env_context.get(match.group(1), "")
 
     return re.sub(r"!\{\s*echo\s+\$([A-Za-z0-9_]+)\s*\}", _replace, raw_prompt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Write outputs to stdout asynchronously
+# ─────────────────────────────────────────────────────────────────────────────
+def _write_stdout(text: str) -> None:
+    import sys
+
+    sys.stdout.write(text)
+    sys.stdout.flush()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -368,11 +384,12 @@ def _write_github_output(full_text: str) -> None:
 async def main() -> None:
     # ── 1. Collect environment variables ─────────────────────────────────────
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTIGRAVITY_API_KEY")
-    github_token = (
-        os.environ.get("GITHUB_TOKEN")
-        or os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+        "GITHUB_PERSONAL_ACCESS_TOKEN"
     )
-    pr_number = os.environ.get("PULL_REQUEST_NUMBER") or os.environ.get("GITHUB_PR_NUMBER")
+    pr_number = os.environ.get("PULL_REQUEST_NUMBER") or os.environ.get(
+        "GITHUB_PR_NUMBER"
+    )
     repository = os.environ.get("REPOSITORY") or os.environ.get("GITHUB_REPOSITORY")
     additional_context = os.environ.get("ADDITIONAL_CONTEXT", "")
     prompt_text = os.environ.get("PROMPT", "").strip()
@@ -413,10 +430,7 @@ async def main() -> None:
             "GITHUB_ACTION",
             "GITHUB_ACTION_PATH",
         }
-        safe_env = {
-            k: v for k, v in os.environ.items()
-            if k in safe_env_keys
-        }
+        safe_env = {k: v for k, v in os.environ.items() if k in safe_env_keys}
 
         env_context = {
             **safe_env,
@@ -484,8 +498,7 @@ async def main() -> None:
         print("\n::: Agent Response Start :::")
         tokens: list[str] = []
         async for token in response:
-            sys.stdout.write(token)
-            sys.stdout.flush()
+            await asyncio.to_thread(_write_stdout, token)
             tokens.append(token)
         print("\n::: Agent Response End :::")
 
